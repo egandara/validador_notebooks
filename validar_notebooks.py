@@ -21,34 +21,25 @@ def validar_sql_magic(codigo):
                 "Tipo": "Uso de %sql",
                 "Linea": i,
                 "Contenido": linea.strip(),
-                "Detalle": "El comando '%sql' debe ser reemplazado por spark.sql() o eliminarlo."
+                "Detalle": "El comando '%sql' debe ser reemplazado por spark.sql() o quitado."
             })
     return hallazgos
 
 def validar_rutas_en_duro(codigo):
     """
     Valida que no existan rutas absolutas o relativas en duro en el código.
-    Permite solo nombres de archivo sin ruta.
     """
     hallazgos = []
-    # Regex para encontrar strings que contengan / o \.
     regex_rutas = re.compile(r'("|\').*(\/|\\).*("|\')')
     
     lineas = codigo.split('\n')
     for i, linea in enumerate(lineas, 1):
         if linea.strip().startswith('#'):
             continue
-
-        # Usamos finditer para encontrar todas las posibles rutas en una línea
         for match in regex_rutas.finditer(linea):
             ruta_encontrada = match.group(0)
-            
-            # --- HEURÍSTICA PARA EVITAR FALSOS POSITIVOS ---
-            # Si la cadena parece un JSON (contiene { y :), es probable que no sea una ruta.
             if '{' in ruta_encontrada and ':' in ruta_encontrada:
                 continue
-
-            # Excluimos URLs comunes para reducir falsos positivos
             if not re.search(r'https?:\/\/', ruta_encontrada):
                  hallazgos.append({
                      "Tipo": "Ruta en duro",
@@ -56,6 +47,42 @@ def validar_rutas_en_duro(codigo):
                      "Contenido": ruta_encontrada.strip(),
                      "Detalle": "Posible ruta en duro encontrada."
                  })
+    return hallazgos
+
+def validar_footer_notebook(celdas):
+    """
+    Valida la estructura del footer en un notebook .ipynb.
+    """
+    hallazgos = []
+    indice_footer_markdown = -1
+    
+    # 1. Encontrar la celda "Mensaje Final"
+    for i, celda in enumerate(celdas):
+        if celda.get('cell_type') == 'markdown':
+            contenido = "".join(celda.get('source', []))
+            if "Mensaje Final" in contenido:
+                indice_footer_markdown = i
+                break
+    
+    if indice_footer_markdown == -1:
+        hallazgos.append({"Tipo": "Footer Faltante", "Detalle": "No se encontró la celda Markdown con 'Mensaje Final'."})
+        return hallazgos
+
+    # 2. Validar la celda de exit
+    indice_celda_exit = indice_footer_markdown + 1
+    if indice_celda_exit >= len(celdas):
+        hallazgos.append({"Tipo": "Footer Incorrecto", "Detalle": "Falta la celda de código con 'dbutils.notebook.exit' después del Mensaje Final."})
+        return hallazgos
+
+    celda_exit = celdas[indice_celda_exit]
+    if celda_exit.get('cell_type') != 'code' or "dbutils.notebook.exit" not in "".join(celda_exit.get('source', [])):
+        hallazgos.append({"Tipo": "Footer Incorrecto", "Detalle": "La celda siguiente al Mensaje Final no es una celda de código con 'dbutils.notebook.exit'."})
+        return hallazgos
+
+    # 3. Validar que no haya celdas posteriores
+    if len(celdas) > (indice_celda_exit + 1):
+        hallazgos.append({"Tipo": "Código posterior al final", "Detalle": f"Se encontró código o celdas después de la celda final en la celda número {indice_celda_exit + 2}."})
+
     return hallazgos
 
 def analizar_notebook(file_path):
@@ -72,19 +99,26 @@ def analizar_notebook(file_path):
                 celdas = [{'cell_type': 'code', 'source': f.readlines()}]
             else:
                 return [{"Tipo": "Error de Archivo", "Detalle": "Formato no soportado."}]
-
     except Exception as e:
         return [{"Tipo": "Error de Lectura", "Detalle": f"Error al leer o parsear el archivo: {e}"}]
 
+    # --- Validaciones a nivel de celda ---
     for i, cell in enumerate(celdas):
         if cell.get('cell_type') == 'code':
             codigo = "".join(cell.get('source', []))
-            
-            # Recolectar hallazgos y agregar número de celda
-            validaciones = validar_sql_magic(codigo) + validar_rutas_en_duro(codigo)
+            validaciones = (
+                validar_sql_magic(codigo) + 
+                validar_rutas_en_duro(codigo)
+            )
             for hallazgo in validaciones:
                 hallazgo['Celda'] = i + 1
                 hallazgos_totales.append(hallazgo)
+
+    # --- Validaciones a nivel de notebook (.ipynb) ---
+    if file_path.endswith('.ipynb'):
+        hallazgos_notebook = validar_footer_notebook(celdas)
+        for hallazgo in hallazgos_notebook:
+            hallazgos_totales.append(hallazgo)
 
     return hallazgos_totales
 
@@ -101,7 +135,6 @@ def main():
     parser.add_argument("--output-format", help="Formato del archivo de salida.", choices=['txt', 'csv'], default='txt')
     
     args = parser.parse_args()
-
     ruta_base = args.ruta
     archivos_a_validar = []
 
@@ -120,7 +153,6 @@ def main():
         print("No se encontraron archivos de notebook para validar.")
         sys.exit(0)
 
-    # --- Recopilación de resultados ---
     resultados_globales = []
     conteo_problemas_por_archivo = {}
 
@@ -135,19 +167,17 @@ def main():
             p['Archivo'] = fn
             resultados_globales.append(p)
 
-    # --- Impresión de resultados ---
     print("\n---\n📁 Archivos:")
     print("❌ Con problemas:")
-    for fn, c in conteo_problemas_por_archivo.items():
+    for fn, c in sorted(conteo_problemas_por_archivo.items()):
         if c > 0:
             print(f"  ❌ {fn} ({c} problemas)")
     
     print("✅ Sin problemas:")
-    for fn, c in conteo_problemas_por_archivo.items():
+    for fn, c in sorted(conteo_problemas_por_archivo.items()):
         if c == 0:
             print(f"  ✅ {fn}")
 
-    # --- Impresión del resumen ---
     total_files = len(archivos_a_validar)
     total_problems = len(resultados_globales)
     print("\n---\n📊 Resumen:")
@@ -160,25 +190,24 @@ def main():
         for r in resultados_globales:
             tipo = r.get("Tipo", "Desconocido")
             tipos[tipo] = tipos.get(tipo, 0) + 1
-        for t, c in tipos.items():
+        for t, c in sorted(tipos.items()):
             print(f"    - {t}: {c}")
 
-    # --- Guardado en archivo ---
     if args.output_file and total_problems > 0:
         try:
-            with open(args.output_file, 'w', encoding='utf-8') as f:
+            # Se cambia a 'utf-8-sig' para que Excel reconozca los caracteres especiales (tildes).
+            with open(args.output_file, 'w', encoding='utf-8-sig') as f:
                 if args.output_format == 'csv':
-                    f.write("archivo,celda,linea,tipo_problema,contenido_del_problema,detalle\n")
+                    f.write("archivo,celda,línea,tipo_problema,contenido_del_problema,detalle\n")
                     for r in resultados_globales:
-                        # Escapar comillas dobles en el contenido para formato CSV correcto
                         contenido = r.get("Contenido", "").replace('"', '""')
-                        f.write(f'"{r.get("Archivo","")}",'
-                                f'"{r.get("Celda","")}",'
-                                f'"{r.get("Linea","")}",'
-                                f'"{r.get("Tipo","")}",'
+                        f.write(f'"{r.get("Archivo","N/A")}",'
+                                f'"{r.get("Celda","N/A")}",'
+                                f'"{r.get("Linea","N/A")}",'
+                                f'"{r.get("Tipo","N/A")}",'
                                 f'"{contenido}",'
                                 f'"{r.get("Detalle","")}"\n')
-                else: # txt
+                else:
                     for r in resultados_globales:
                         f.write(f'Archivo: {r.get("Archivo","")} | Celda: {r.get("Celda","")} | Línea: {r.get("Linea","")} | Tipo: {r.get("Tipo","")} | Contenido: {r.get("Contenido","")}\n')
             print(f"\nResultados detallados guardados en: {args.output_file}")
