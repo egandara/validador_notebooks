@@ -131,8 +131,6 @@ def main():
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("ruta", help="Ruta al archivo o directorio de notebooks a validar.")
-    parser.add_argument("--output-file", help="Archivo para guardar los hallazgos.", default=None)
-    parser.add_argument("--output-format", help="Formato del archivo de salida.", choices=['txt', 'csv'], default='txt')
     
     args = parser.parse_args()
     ruta_base = args.ruta
@@ -193,24 +191,20 @@ def main():
         for t, c in sorted(tipos.items()):
             print(f"    - {t}: {c}")
 
-    if args.output_file and total_problems > 0:
+        # --- Guardado automático en archivo CSV ---
+        output_filename = "hallazgos_validacion.csv"
         try:
-            # Se cambia a 'utf-8-sig' para que Excel reconozca los caracteres especiales (tildes).
-            with open(args.output_file, 'w', encoding='utf-8-sig') as f:
-                if args.output_format == 'csv':
-                    f.write("archivo,celda,línea,tipo_problema,contenido_del_problema,detalle\n")
-                    for r in resultados_globales:
-                        contenido = r.get("Contenido", "").replace('"', '""')
-                        f.write(f'"{r.get("Archivo","N/A")}",'
-                                f'"{r.get("Celda","N/A")}",'
-                                f'"{r.get("Linea","N/A")}",'
-                                f'"{r.get("Tipo","N/A")}",'
-                                f'"{contenido}",'
-                                f'"{r.get("Detalle","")}"\n')
-                else:
-                    for r in resultados_globales:
-                        f.write(f'Archivo: {r.get("Archivo","")} | Celda: {r.get("Celda","")} | Línea: {r.get("Linea","")} | Tipo: {r.get("Tipo","")} | Contenido: {r.get("Contenido","")}\n')
-            print(f"\nResultados detallados guardados en: {args.output_file}")
+            with open(output_filename, 'w', encoding='utf-8-sig') as f:
+                f.write("archivo,celda,línea,tipo_problema,contenido_del_problema,detalle\n")
+                for r in resultados_globales:
+                    contenido = r.get("Contenido", "").replace('"', '""')
+                    f.write(f'"{r.get("Archivo","N/A")}",'
+                            f'"{r.get("Celda","N/A")}",'
+                            f'"{r.get("Linea","N/A")}",'
+                            f'"{r.get("Tipo","N/A")}",'
+                            f'"{contenido}",'
+                            f'"{r.get("Detalle","")}"\n')
+            print(f"\nResultados detallados guardados en: {output_filename}")
         except Exception as e:
             print(f"\nError al guardar el archivo de salida: {e}")
 
