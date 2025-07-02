@@ -21,7 +21,7 @@ def validar_sql_magic(codigo):
                 "Tipo": "Uso de %sql",
                 "Linea": i,
                 "Contenido": linea.strip(),
-                "Detalle": "El comando mágico '%sql' debe ser reemplazado por spark.sql()."
+                "Detalle": "El comando '%sql' debe ser reemplazado por spark.sql() o quitado."
             })
     return hallazgos
 
