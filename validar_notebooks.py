@@ -21,7 +21,7 @@ def validar_sql_magic(codigo):
                 "Tipo": "Uso de %sql",
                 "Linea": i,
                 "Contenido": linea.strip(),
-                "Detalle": "El comando '%sql' debe ser reemplazado por spark.sql() o quitado."
+                "Detalle": "El comando mágico '%sql' debe ser reemplazado por spark.sql()."
             })
     return hallazgos
 
@@ -49,6 +49,132 @@ def validar_rutas_en_duro(codigo):
                  })
     return hallazgos
 
+def validar_parametros_no_usados(celdas):
+    """
+    Valida que los parámetros de widgets declarados con .text() se usen con .get().
+    """
+    hallazgos = []
+    codigo_completo = ""
+    for celda in celdas:
+        if celda.get('cell_type') == 'code':
+            codigo_completo += "".join(celda.get('source', [])) + "\n"
+
+    if not codigo_completo:
+        return hallazgos
+
+    # Extrae todos los parámetros declarados y usados
+    regex_declaracion = re.compile(r'dbutils\.widgets\.text\s*\(\s*["\']([^"\']+)["\']')
+    regex_uso = re.compile(r'dbutils\.widgets\.get\s*\(\s*["\']([^"\']+)["\']')
+    
+    declared_params = set(regex_declaracion.findall(codigo_completo))
+    used_params = set(regex_uso.findall(codigo_completo))
+
+    unused_params = declared_params - used_params
+
+    # Si hay parámetros no usados, encuentra dónde se declararon
+    if unused_params:
+        for i, celda in enumerate(celdas):
+            if celda.get('cell_type') == 'code':
+                lineas = celda.get('source', [])
+                for j, linea in enumerate(lineas, 1):
+                    for param in unused_params:
+                        # Comprueba si esta línea declara el parámetro no usado
+                        if 'dbutils.widgets.text' in linea and (f'"{param}"' in linea or f"'{param}'" in linea):
+                            hallazgos.append({
+                                "Tipo": "Parámetro no usado",
+                                "Celda": i + 1,
+                                "Linea": j,
+                                "Contenido": linea.strip(),
+                                "Detalle": f"El parámetro de widget '{param}' se declara pero nunca se usa con dbutils.widgets.get()."
+                            })
+    return hallazgos
+
+def validar_variables_widgets_no_usadas(celdas):
+    """
+    Valida que las variables creadas a partir de dbutils.widgets.get() se usen posteriormente.
+    Ignora el uso en sentencias print() y spark.conf.set().
+    """
+    hallazgos = []
+    
+    # Regex para encontrar la asignación de variable desde un widget.get()
+    regex_asignacion = re.compile(r'^\s*([\w\d_]+)\s*=\s*dbutils\.widgets\.get\s*\(')
+    
+    declaraciones = []
+    codigo_completo_por_celda = {}
+
+    # 1. Recolectar todas las declaraciones y todo el código
+    for i, celda in enumerate(celdas):
+        if celda.get('cell_type') == 'code':
+            codigo_celda = "".join(celda.get('source', []))
+            codigo_completo_por_celda[i] = codigo_celda
+            lineas = codigo_celda.split('\n')
+            for j, linea in enumerate(lineas, 1):
+                match = regex_asignacion.search(linea)
+                if match:
+                    nombre_variable = match.group(1)
+                    declaraciones.append({
+                        "nombre": nombre_variable,
+                        "celda_idx": i,
+                        "linea_idx": j,
+                        "contenido": linea.strip()
+                    })
+
+    # 2. Para cada declaración, buscar su uso en el resto del notebook
+    for decl in declaraciones:
+        variable_usada = False
+        nombre_var = decl["nombre"]
+        
+        for i, codigo_celda in codigo_completo_por_celda.items():
+            lineas = codigo_celda.split('\n')
+            for j, linea in enumerate(lineas, 1):
+                # Ignorar la línea de declaración original
+                if i == decl["celda_idx"] and j == decl["linea_idx"]:
+                    continue
+                
+                # Ignorar líneas que son solo un print o un spark.conf.set
+                stripped_line = linea.strip()
+                if stripped_line.startswith('print(') or stripped_line.startswith('spark.conf.set('):
+                    continue
+
+                # Buscar un uso válido de la variable (como palabra completa)
+                if re.search(r'\b' + re.escape(nombre_var) + r'\b', linea):
+                    variable_usada = True
+                    break # Salir del bucle de líneas
+            if variable_usada:
+                break # Salir del bucle de celdas
+
+        # 3. Si no se encontró uso, registrar el hallazgo
+        if not variable_usada:
+            hallazgos.append({
+                "Tipo": "Variable de Widget no usada",
+                "Celda": decl["celda_idx"] + 1,
+                "Linea": decl["linea_idx"],
+                "Contenido": decl["contenido"],
+                "Detalle": f"La variable '{decl['nombre']}' se obtiene de un widget pero no se usa posteriormente (ignorando prints y spark.conf.set)."
+            })
+            
+    return hallazgos
+
+def validar_header_notebook(celdas, file_path):
+    """
+    Valida que la primera celda del notebook contenga el nombre del archivo.
+    """
+    hallazgos = []
+    if not celdas:
+        return hallazgos 
+
+    nombre_base = os.path.splitext(os.path.basename(file_path))[0]
+    primera_celda = celdas[0]
+    contenido_primera_celda = "".join(primera_celda.get('source', []))
+
+    if nombre_base not in contenido_primera_celda:
+        hallazgos.append({
+            "Tipo": "Header Incorrecto",
+            "Celda": 1,
+            "Detalle": f"La primera celda no contiene el nombre del archivo '{nombre_base}'."
+        })
+    return hallazgos
+
 def validar_footer_notebook(celdas):
     """
     Valida la estructura del footer en un notebook .ipynb.
@@ -56,7 +182,6 @@ def validar_footer_notebook(celdas):
     hallazgos = []
     indice_footer_markdown = -1
     
-    # 1. Encontrar la celda "Mensaje Final"
     for i, celda in enumerate(celdas):
         if celda.get('cell_type') == 'markdown':
             contenido = "".join(celda.get('source', []))
@@ -68,7 +193,6 @@ def validar_footer_notebook(celdas):
         hallazgos.append({"Tipo": "Footer Faltante", "Detalle": "No se encontró la celda Markdown con 'Mensaje Final'."})
         return hallazgos
 
-    # 2. Validar la celda de exit
     indice_celda_exit = indice_footer_markdown + 1
     if indice_celda_exit >= len(celdas):
         hallazgos.append({"Tipo": "Footer Incorrecto", "Detalle": "Falta la celda de código con 'dbutils.notebook.exit' después del Mensaje Final."})
@@ -79,7 +203,6 @@ def validar_footer_notebook(celdas):
         hallazgos.append({"Tipo": "Footer Incorrecto", "Detalle": "La celda siguiente al Mensaje Final no es una celda de código con 'dbutils.notebook.exit'."})
         return hallazgos
 
-    # 3. Validar que no haya celdas posteriores
     if len(celdas) > (indice_celda_exit + 1):
         hallazgos.append({"Tipo": "Código posterior al final", "Detalle": f"Se encontró código o celdas después de la celda final en la celda número {indice_celda_exit + 2}."})
 
@@ -116,7 +239,12 @@ def analizar_notebook(file_path):
 
     # --- Validaciones a nivel de notebook (.ipynb) ---
     if file_path.endswith('.ipynb'):
-        hallazgos_notebook = validar_footer_notebook(celdas)
+        hallazgos_notebook = (
+            validar_header_notebook(celdas, file_path) +
+            validar_footer_notebook(celdas) +
+            validar_parametros_no_usados(celdas) +
+            validar_variables_widgets_no_usadas(celdas)
+        )
         for hallazgo in hallazgos_notebook:
             hallazgos_totales.append(hallazgo)
 
